@@ -24,10 +24,11 @@
             }
         },
         {
-            "name": "Python: Example Usage",
+            "name": "Python: Run Agent (one-shot)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/example_usage.py",
+            "program": "${workspaceFolder}/run_agent.py",
+            "args": ["what time is it in San Diego?"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "env": {

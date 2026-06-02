@@ -85,10 +85,31 @@ so the agent can honor "avoid paid parking" constraints.
 
 ### Development
 
-- **Run the project:**
+- **Run the agent (interactive REPL):**
   ```bash
-  uv run src/main.py
+  uv run python run_agent.py
   ```
+
+- **Ask a one-off question (one-shot mode):**
+  ```bash
+  uv run python run_agent.py "what trolley stations are near UTC?"
+  ```
+
+- **Install as a global command** (then run `sd-trolley` from anywhere):
+  ```bash
+  uv tool install .
+  sd-trolley                                   # interactive REPL
+  sd-trolley "leave time to reach Petco Park by 6pm from La Jolla"
+  ```
+  > To use it from any directory, put your config where the installed command
+  > can always find it (it needs Ollama running locally):
+  > ```bash
+  > mkdir -p ~/.config/sd-trolley
+  > cp .env ~/.config/sd-trolley/.env
+  > ```
+  > Config is resolved in this order (first wins, real env vars are never
+  > overridden): exported environment variables → `.env` in the current
+  > directory → `~/.config/sd-trolley/.env`.
 
 - **Format code:**
   ```bash
@@ -159,7 +180,8 @@ sd-trolley-agent/
 │   ├── state.py             # LangGraph state schema (messages + reducer)
 │   ├── llm.py               # Chat model setup (tool-calling capable)
 │   ├── prompts.py           # System prompt
-│   ├── graph.py             # The ReAct agent graph (build_graph)
+│   ├── graph.py             # The ReAct agent graph (build_agent)
+│   ├── cli.py               # CLI logic (REPL + one-shot); sd-trolley entry
 │   └── tools/               # Tools the agent can call
 │       ├── __init__.py      # ALL_TOOLS registry
 │       ├── _clients.py      # Shared, cached Google API clients
@@ -170,20 +192,21 @@ sd-trolley-agent/
 │       ├── location.py      # Current location (Google Geolocation)
 │       └── clock.py         # Current time in San Diego
 ├── tests/                   # Test scaffolding
-├── run_agent.py             # Interactive CLI entry point
+├── run_agent.py             # Convenience launcher (REPL + one-shot)
 ├── pyproject.toml           # Project configuration and dependencies
 ├── README.md               # This file
 └── .gitignore              # Git ignore rules
 ```
 
-The agent loop lives in `src/graph.py`. The intended flow is a ReAct loop:
+The agent loop lives in `src/graph.py`. The flow is a ReAct loop:
 
 ```
 START -> agent -> (tool calls?) -> tools -> agent -> ... -> END
 ```
 
-Implement the `NotImplementedError` stubs (tools, `get_llm`, `agent_node`,
-`build_graph`) to bring the agent to life.
+The LLM node (`llm_node`), tool registry (`ALL_TOOLS`), and `build_agent()`
+are all implemented; `get_llm()` returns a tool-calling `ChatOllama` configured
+from the `OLLAMA_*` env vars.
 
 ## Features
 

@@ -97,6 +97,34 @@ def _format_clock(dep_seconds: float) -> str:
     )
 
 
+def _parse_service_date(value: str) -> str:
+    """Parse a service date into GTFS ``YYYYMMDD`` form.
+
+    Accepts ISO ``YYYY-MM-DD``, compact ``YYYYMMDD``, or ``MM/DD/YYYY``.
+    """
+    for fmt in ("%Y-%m-%d", "%Y%m%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(value.strip(), fmt).strftime("%Y%m%d")
+        except ValueError:
+            continue
+    raise ValueError(f"Could not parse date '{value}'; use YYYY-MM-DD (e.g. 2026-06-05).")
+
+
+def _parse_clock_to_seconds(value: str) -> int:
+    """Parse a clock string into seconds since midnight.
+
+    Accepts 24-hour ``HH:MM`` or 12-hour ``H:MM AM/PM`` forms.
+    """
+    v = value.strip().upper()
+    for fmt in ("%H:%M", "%I:%M %p", "%I:%M%p", "%I %p"):
+        try:
+            t = datetime.strptime(v, fmt)
+            return t.hour * 3600 + t.minute * 60
+        except ValueError:
+            continue
+    raise ValueError(f"Could not parse time '{value}'; use HH:MM (e.g. 17:00).")
+
+
 @tool
 def find_nearby_trolley_stations(location: str, radius_meters: int = 1500) -> str:
     """Find San Diego Trolley stations near a location.
@@ -142,16 +170,32 @@ def find_nearby_trolley_stations(location: str, radius_meters: int = 1500) -> st
 
 
 @tool
-def get_trolley_schedule(station: str, line: str | None = None) -> str:
+def get_trolley_schedule(
+    station: str,
+    line: str | None = None,
+    service_date: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+) -> str:
     """Get the published (scheduled) trolley timetable for a station.
 
     Args:
         station: Trolley station name (e.g. "Old Town").
         line: Optional line filter (e.g. "Blue", "Green", "Orange").
+        service_date: Optional service date as "YYYY-MM-DD" (defaults to today
+            in San Diego). Use this to plan for a future day, e.g. "this Friday".
+        after: Optional earliest departure time as "HH:MM" (24-hour) or
+            "H:MM AM/PM". Departures before this are excluded. When omitted and
+            the date is today, the current time is used so only upcoming
+            departures are shown.
+        before: Optional latest departure time as "HH:MM" / "H:MM AM/PM".
+            Departures after this are excluded. Useful to find the last trolley
+            that still arrives by a target time.
 
     Returns:
-        The next scheduled departures from the station today, from MTS static
-        GTFS. These are scheduled times, not real-time arrivals.
+        The scheduled departures from the station for the requested date and
+        time window, from MTS static GTFS. These are scheduled times, not
+        real-time arrivals.
     """
     try:
         feed = get_feed()
@@ -165,16 +209,30 @@ def get_trolley_schedule(station: str, line: str | None = None) -> str:
             return f"No trolley station matching '{station}' was found."
         stop_ids = matches["stop_id"].tolist()
 
-        # 2. Build today's timetable for each matched stop.
+        # 2. Resolve the service date (defaults to today) and parse the optional
+        #    time-window bounds up front so bad input fails with a clear message.
         now = _now_pacific()
         today = now.strftime("%Y%m%d")
+        date = _parse_service_date(service_date) if service_date else today
+        is_today = date == today
+        # "today" reads naturally on its own; a specific date wants an "on" prefix.
+        if is_today:
+            date_label = "today"
+            when_label = "today"
+        else:
+            date_label = datetime.strptime(date, "%Y%m%d").strftime("%A %Y-%m-%d")
+            when_label = f"on {date_label}"
+        after_seconds = _parse_clock_to_seconds(after) if after else None
+        before_seconds = _parse_clock_to_seconds(before) if before else None
+
+        # 3. Build the requested day's timetable for each matched stop.
         frames = [
             tt
             for sid in stop_ids
-            if not (tt := feed.build_stop_timetable(sid, [today])).empty
+            if not (tt := feed.build_stop_timetable(sid, [date])).empty
         ]
         if not frames:
-            return f"No scheduled trolley service at '{station}' today."
+            return f"No scheduled trolley service at '{station}' {when_label}."
         timetable = pd.concat(frames, ignore_index=True)
 
         # 3. Restrict to light-rail (trolley) routes so buses sharing a stop
@@ -200,25 +258,44 @@ def get_trolley_schedule(station: str, line: str | None = None) -> str:
             target = f"the {line} line at '{station}'" if line else f"'{station}'"
             return f"No scheduled trolley service for {target} today."
 
-        # 5. Keep upcoming departures (handles GTFS times >= 24:00:00).
-        now_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        # 5. Apply the time window (handles GTFS times >= 24:00:00).
+        #    Lower bound: explicit `after`, else "now" only when planning today.
+        #    Upper bound: explicit `before`. No bound otherwise.
         timetable = timetable.assign(
             _dep=timetable["departure_time"].map(timestr_to_seconds)
         )
-        upcoming = timetable[timetable["_dep"] >= now_seconds].sort_values("_dep")
-        if upcoming.empty:
-            return f"No more scheduled trolley departures from '{station}' today."
+        if after_seconds is not None:
+            lower = after_seconds
+        elif is_today:
+            lower = now.hour * 3600 + now.minute * 60 + now.second
+        else:
+            lower = None
 
-        # 6. Format the next few departures.
+        window = timetable
+        if lower is not None:
+            window = window[window["_dep"] >= lower]
+        if before_seconds is not None:
+            window = window[window["_dep"] <= before_seconds]
+        window = window.sort_values("_dep")
+
+        if window.empty:
+            if lower is not None and before_seconds is None and is_today:
+                return f"No more scheduled trolley departures from '{station}' today."
+            return (
+                f"No scheduled trolley departures from '{station}' "
+                f"{when_label} in the requested time window."
+            )
+
+        # 6. Format the matching departures.
         lines = []
-        for _, row in upcoming.head(_MAX_DEPARTURES).iterrows():
+        for _, row in window.head(_MAX_DEPARTURES).iterrows():
             label = row.get("route_long_name") or row.get("route_short_name") or "Trolley"
             headsign = row.get("trip_headsign")
             when = _format_clock(row["_dep"])
             lines.append(f"- {when}  {label}" + (f"  (to {headsign})" if headsign else ""))
 
         return (
-            f"Scheduled trolley departures from {station} today:\n"
+            f"Scheduled trolley departures from {station} {when_label}:\n"
             + "\n".join(lines)
             + "\n(Scheduled times from MTS static GTFS; real-time arrivals are not available.)"
         )

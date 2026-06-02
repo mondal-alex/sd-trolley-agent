@@ -316,6 +316,45 @@ class TestGetTrolleySchedule:
         result = self._run(gtfs_feed, line="Green")
         assert "No scheduled trolley service for the Green line" in result
 
+    def test_future_service_date_ignores_now(self, gtfs_feed):
+        # A future Friday: the current time must NOT filter out earlier
+        # departures (the morning 6:00 AM trip should still be listed).
+        result = self._run(gtfs_feed, service_date="2026-06-05")
+        assert (
+            "Scheduled trolley departures from Old Town on Friday 2026-06-05:"
+            in result
+        )
+        assert "6:00 AM" in result
+        assert "5:10 PM" in result
+        assert "5:25 PM" in result
+
+    def test_before_window_limits_departures(self, gtfs_feed):
+        # Today, only departures up to 5:20 PM -> just the 5:10 PM trolley
+        # (5:25 PM is too late, 6:00 AM already past "now" of 5:00 PM).
+        result = self._run(gtfs_feed, before="17:20")
+        assert "5:10 PM" in result
+        assert "5:25 PM" not in result
+
+    def test_after_and_before_window_on_future_date(self, gtfs_feed):
+        # 12-hour clock input is accepted; window keeps only the 5:10 PM trip.
+        result = self._run(
+            gtfs_feed, service_date="2026-06-05", after="5:00 PM", before="5:20 PM"
+        )
+        assert "5:10 PM" in result
+        assert "6:00 AM" not in result
+        assert "5:25 PM" not in result
+
+    def test_empty_window_message(self, gtfs_feed):
+        result = self._run(
+            gtfs_feed, service_date="2026-06-05", after="19:00", before="20:00"
+        )
+        assert "No scheduled trolley departures" in result
+        assert "in the requested time window" in result
+
+    def test_invalid_date_returns_error_string(self, gtfs_feed):
+        result = self._run(gtfs_feed, service_date="not-a-date")
+        assert "Error getting trolley schedule" in result
+
     def test_unknown_station(self, gtfs_feed):
         with patch("src.tools.trolley.get_feed", return_value=gtfs_feed), patch(
             "src.tools.trolley._now_pacific", return_value=self._NOW
