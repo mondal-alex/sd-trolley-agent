@@ -9,10 +9,14 @@ use and how to fill in the arguments.
 """
 
 from .clock import get_current_time
-from .location import get_current_location
 from .parking import get_station_parking_info
 from .routing import get_driving_time, get_walking_time
-from .trolley import find_nearby_trolley_stations, get_trolley_schedule
+from .timeline import build_trip_timeline
+from .trolley import (
+    find_nearby_trolley_stations,
+    get_trolley_schedule,
+    get_trolley_trips_between_stations,
+)
 
 # The agent binds this list to the LLM and hands it to the tool node.
 ALL_TOOLS = [
@@ -20,8 +24,9 @@ ALL_TOOLS = [
     get_walking_time,
     find_nearby_trolley_stations,
     get_trolley_schedule,
+    get_trolley_trips_between_stations,
+    build_trip_timeline,
     get_station_parking_info,
-    get_current_location,
     get_current_time,
 ]
 
@@ -31,7 +36,8 @@ __all__ = [
     "get_walking_time",
     "find_nearby_trolley_stations",
     "get_trolley_schedule",
+    "get_trolley_trips_between_stations",
+    "build_trip_timeline",
     "get_station_parking_info",
-    "get_current_location",
     "get_current_time",
 ]

@@ -36,4 +36,4 @@ _user_env = Path(
 if _user_env.is_file():
     load_dotenv(_user_env)
 
-__version__ = "0.3.0"
+__version__ = "0.3.8"

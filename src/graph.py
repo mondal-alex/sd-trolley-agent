@@ -36,10 +36,13 @@ Docs / references:
 - ChatOllama: https://python.langchain.com/docs/integrations/chat/ollama/
 """
 
+from typing import Optional
+
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
 from .llm import get_llm
@@ -73,14 +76,18 @@ def llm_node(state: AgentState) -> dict:
     return {"messages": [response]}
 
 
-def build_agent() -> CompiledStateGraph:
+def build_agent(
+    *,
+    checkpointer: Optional[BaseCheckpointSaver] = None,
+) -> CompiledStateGraph:
     """Construct and compile the ReAct agent graph.
 
     Wires ``START -> llm_node -> (tools? -> tool_node -> llm_node)* -> END`` and
     compiles with an in-memory checkpointer so a conversation persists across
-    turns when invoked with the same ``thread_id``.
+    turns in the same process when invoked with the same ``thread_id``.
     """
-    checkpointer = InMemorySaver()
+    if checkpointer is None:
+        checkpointer = InMemorySaver()
 
     # Add nodes
     agent_builder = StateGraph(AgentState)

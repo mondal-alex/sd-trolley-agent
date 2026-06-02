@@ -24,15 +24,13 @@ The agent's tools call several Google Maps Platform APIs. Enable these in your
 | API | Powers | Client library | Used for |
 |-----|--------|----------------|----------|
 | Routes API | `get_driving_time`, `get_walking_time` | `google-maps-routing` | Route duration/distance (traffic-aware driving) |
-| Geocoding API | `find_nearby_trolley_stations`, `get_current_location` | `googlemaps` | Address ↔ lat/lng (and reverse geocoding) |
-| Geolocation API | `get_current_location` | `googlemaps` | Estimate location from network signals (no GPS) |
+| Geocoding API | `find_nearby_trolley_stations` | `googlemaps` | Address ↔ lat/lng for station search |
 
 > This project uses Google's **current** APIs. Routes API replaces the legacy
 > Directions + Distance Matrix APIs and is recommended for new projects (it may
 > be the only version enableable on a freshly created Cloud project).
 
-> Geocoding and Geolocation have no "new" successor; they're accessed with the
-> `googlemaps` client and are still fully supported.
+> Geocoding has no "new" successor; it is accessed with the `googlemaps` client.
 
 > `find_nearby_trolley_stations` does **not** use Google Places — it geocodes
 > the input location, then finds the nearest trolley stations directly from the
@@ -43,8 +41,7 @@ The agent's tools call several Google Maps Platform APIs. Enable these in your
 > response fields you want) or the response comes back empty.
 
 > Minimal start: only **Routes API** is needed to get the routing tools
-> working. Add Geocoding + Geolocation when implementing the station-finding and
-> location tools.
+> working. Add **Geocoding** for `find_nearby_trolley_stations`.
 
 ### Trolley data (GTFS)
 
@@ -85,21 +82,23 @@ so the agent can honor "avoid paid parking" constraints.
 
 ### Development
 
-- **Run the agent (interactive REPL):**
+- **Run the agent (one session, smooth follow-ups):**
   ```bash
   uv run python run_agent.py
   ```
-
-- **Ask a one-off question (one-shot mode):**
+  Or open with your first question — you stay in the same chat until you type
+  `quit` (no need to re-run the command for follow-ups):
   ```bash
-  uv run python run_agent.py "what trolley stations are near UTC?"
+  uv run python run_agent.py "When should I leave for Petco Park by 6pm? I'm at 4109 Park Pl, San Diego 92116."
+  # Agent replies, then:
+  User: quit
   ```
 
 - **Install as a global command** (then run `sd-trolley` from anywhere):
   ```bash
   uv tool install .
-  sd-trolley                                   # interactive REPL
-  sd-trolley "leave time to reach Petco Park by 6pm from La Jolla"
+  sd-trolley
+  sd-trolley "When should I leave for Petco Park by 6pm? I can drive to a station."
   ```
   > To use it from any directory, put your config where the installed command
   > can always find it (it needs Ollama running locally):
@@ -189,7 +188,6 @@ sd-trolley-agent/
 │       ├── trolley.py       # Nearby stations + schedule (GTFS)
 │       ├── parking.py       # Curated MTS park-and-ride data (free/paid)
 │       ├── gtfs.py          # MTS static GTFS feed download/cache
-│       ├── location.py      # Current location (Google Geolocation)
 │       └── clock.py         # Current time in San Diego
 ├── tests/                   # Test scaffolding
 ├── run_agent.py             # Convenience launcher (REPL + one-shot)

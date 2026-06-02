@@ -1,21 +1,15 @@
 """Command-line interface for the SD Trolley Agent.
 
-Two ways to use it:
+Run once and chat in the same session (memory lasts until you quit):
 
-- Interactive REPL (no arguments)::
+    sd-trolley
+    sd-trolley "When should I leave to reach Petco Park by 6pm this Friday?"
 
-      sd-trolley
-      uv run python run_agent.py
+The optional first argument is your opening question; you can answer follow-ups
+at the ``User:`` prompt without re-running the command.
 
-- One-shot question (arguments are joined into a single question, answered
-  once, then the process exits) -- handy for scripting and quick lookups::
-
-      sd-trolley "leave time to reach Petco Park by 6pm from La Jolla"
-      uv run python run_agent.py "what trolley stations are near UTC?"
-
-Conversation memory comes from the graph's checkpointer, scoped to one
-``thread_id`` per process, so follow-up questions in a REPL session retain
-context.
+For scripting (non-interactive terminal), pass a question and stdout is not a TTY
+— the process answers once and exits.
 """
 
 import itertools
@@ -49,8 +43,15 @@ class _Spinner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    def set_message(self, message: str) -> None:
+        """Update the label while the spinner is running."""
+        self._message = message
+
     def __enter__(self) -> "_Spinner":
         if self._enabled:
+            # Draw immediately so the user sees feedback before slow imports/LLM.
+            self._stream.write(f"\r{_SPINNER_FRAMES[0]} {self._message}… ")
+            self._stream.flush()
             self._thread = threading.Thread(target=self._spin, daemon=True)
             self._thread.start()
         return self
@@ -73,13 +74,28 @@ class _Spinner:
             self._stream.flush()
 
 
-def _ask(graph, config, question: str) -> None:
+def _invoke(graph, config, question: str):
+    """Run the graph for one user turn (no UI)."""
+    return graph.invoke(
+        {"messages": [HumanMessage(content=question)]}, config
+    )
+
+
+def _ask(
+    graph,
+    config,
+    question: str,
+    *,
+    spinner: _Spinner | None = None,
+) -> None:
     """Run one question through the graph and print the agent's reply."""
     try:
-        with _Spinner():
-            result = graph.invoke(
-                {"messages": [HumanMessage(content=question)]}, config
-            )
+        if spinner is not None:
+            spinner.set_message("Thinking")
+            result = _invoke(graph, config, question)
+        else:
+            with _Spinner():
+                result = _invoke(graph, config, question)
     except GraphRecursionError:
         print(
             "\nAgent: I got stuck taking too many steps on that one. Try "
@@ -94,28 +110,12 @@ def _ask(graph, config, question: str) -> None:
     print(f"\nAgent: {result['messages'][-1].content}\n")
 
 
-def main() -> None:
-    """Entry point: one-shot if a question is passed on argv, else a REPL."""
-    from src.graph import build_agent
-
-    graph = build_agent()
-    # One thread per process -> one continuous conversation for this session.
-    config = {
-        "recursion_limit": RECURSION_LIMIT,
-        "configurable": {"thread_id": uuid.uuid4().hex},
-    }
-
-    # One-shot mode: everything after the program name is the question.
-    if len(sys.argv) > 1:
-        question = " ".join(sys.argv[1:]).strip()
-        if question:
-            _ask(graph, config, question)
-        return
-
+def _repl(graph, config) -> None:
+    """Interactive loop: one process, one conversation."""
     print("SD Trolley Agent — type 'quit' to exit.\n")
     while True:
         try:
-            user_input = input("You: ").strip()
+            user_input = input("User: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye!")
             break
@@ -127,6 +127,41 @@ def main() -> None:
             continue
 
         _ask(graph, config, user_input)
+
+
+def main() -> None:
+    """One session: optional opening question, then REPL when stdin is a TTY."""
+    opening = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else ""
+    interactive = sys.stdin.isatty()
+
+    # One thread per process — all turns in this run share memory.
+    config = {
+        "recursion_limit": RECURSION_LIMIT,
+        "configurable": {"thread_id": uuid.uuid4().hex},
+    }
+
+    # Imports and graph compile can take tens of seconds on a cold start; show the
+    # spinner immediately and keep it through the first LLM turn.
+    with _Spinner("Starting") as busy:
+        from src.graph import build_agent
+
+        graph = build_agent()
+        if opening:
+            busy.set_message("Thinking")
+            _ask(graph, config, opening, spinner=busy)
+    if opening and not interactive:
+        return
+
+    if interactive:
+        _repl(graph, config)
+    elif not opening:
+        print(
+            "Usage: sd-trolley [question]\n"
+            "  sd-trolley              — interactive trip planner\n"
+            "  sd-trolley \"...\"        — ask a question, then keep chatting\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -31,7 +31,9 @@ from .gtfs import get_feed
 _LIGHT_RAIL_ROUTE_TYPE = 0
 _MAX_STATIONS = 5
 _MAX_DEPARTURES = 8
+_MAX_TRIP_OPTIONS = 8
 _METERS_PER_MILE = 1609.344
+_STATION_BUFFER_MINUTES = 8
 
 
 def _haversine_meters(lat0: float, lon0: float, lats, lons):
@@ -110,6 +112,29 @@ def _parse_service_date(value: str) -> str:
     raise ValueError(f"Could not parse date '{value}'; use YYYY-MM-DD (e.g. 2026-06-05).")
 
 
+def _match_stop_ids(station: str, stops: pd.DataFrame) -> list[str]:
+    """Return GTFS stop_ids whose name contains ``station`` (case-insensitive)."""
+    matches = stops[stops["stop_name"].str.contains(station, case=False, na=False)]
+    return matches["stop_id"].tolist()
+
+
+def _light_rail_trip_ids(feed) -> set[str]:
+    routes = feed.routes
+    lr_routes = routes.loc[
+        pd.to_numeric(routes["route_type"], errors="coerce") == _LIGHT_RAIL_ROUTE_TYPE,
+        "route_id",
+    ]
+    return set(feed.trips.loc[feed.trips["route_id"].isin(lr_routes), "trip_id"])
+
+
+def _trips_on_date(feed, date: str) -> set[str]:
+    """Trip IDs in service on ``date`` (YYYYMMDD)."""
+    day_trips = feed.get_trips(date)
+    if day_trips is None or day_trips.empty:
+        return set()
+    return set(day_trips["trip_id"])
+
+
 def _parse_clock_to_seconds(value: str) -> int:
     """Parse a clock string into seconds since midnight.
 
@@ -126,17 +151,19 @@ def _parse_clock_to_seconds(value: str) -> int:
 
 
 @tool
-def find_nearby_trolley_stations(location: str, radius_meters: int = 1500) -> str:
+def find_nearby_trolley_stations(location: str, radius_meters: int = 15000) -> str:
     """Find San Diego Trolley stations near a location.
 
     Args:
-        location: Address or place name to search around.
-        radius_meters: Search radius in meters.
+        location: Address, zip code, or place name to search around.
+        radius_meters: Search radius in meters. Default 15000 (about 9 mi) suits
+            users who will *drive* to a park-and-ride station. Use a smaller value
+            only for walking-distance checks.
 
     Returns:
         The closest trolley stations within the radius, with straight-line
-        distance. Station names come from MTS GTFS, so they match the names used
-        by get_trolley_schedule.
+        distance. If none fall inside the radius, the nearest stations are still
+        listed. Station names come from MTS GTFS and match get_trolley_schedule.
     """
     try:
         # 1. Resolve the location string to coordinates (Geocoding API).
@@ -157,7 +184,18 @@ def find_nearby_trolley_stations(location: str, radius_meters: int = 1500) -> st
         )
         within = stations[stations["_dist_m"] <= radius_meters].sort_values("_dist_m")
         if within.empty:
-            return f"No trolley stations found within {radius_meters} m of {location}."
+            # User may drive to a station — still return the nearest options instead
+            # of implying the trolley is unavailable.
+            nearest = stations.sort_values("_dist_m").head(_MAX_STATIONS)
+            lines = [
+                f"- {row['stop_name']} ({row['_dist_m'] / _METERS_PER_MILE:.1f} mi)"
+                for _, row in nearest.iterrows()
+            ]
+            return (
+                f"No trolley stations within {radius_meters} m of {location}. "
+                f"Closest stations (straight-line; use get_driving_time to reach them):\n"
+                + "\n".join(lines)
+            )
 
         lines = [
             f"- {row['stop_name']} ({row['_dist_m'] / _METERS_PER_MILE:.1f} mi)"
@@ -302,3 +340,141 @@ def get_trolley_schedule(
 
     except Exception as e:
         return f"Error getting trolley schedule: {e}"
+
+
+@tool
+def get_trolley_trips_between_stations(
+    from_station: str,
+    to_station: str,
+    service_date: str | None = None,
+    arrive_by: str | None = None,
+    after_departure: str | None = None,
+) -> str:
+    """List scheduled trolley trips from one station to another (same vehicle).
+
+    Use this when the user has an **arrive-by** deadline. Each line shows
+    departure from ``from_station`` and scheduled **arrival at ``to_station``**
+    on the same trip. Only trips that reach ``to_station`` by ``arrive_by`` are
+    included (when ``arrive_by`` is set).
+
+    Args:
+        from_station: Boarding station name (e.g. "Mission San Diego").
+        to_station: Alighting station near the destination (e.g. "12th & Imperial"
+            for Petco Park). This is where the rider exits the trolley, not the
+            final venue — add walking time separately with ``get_walking_time``.
+        service_date: Service date "YYYY-MM-DD" (defaults to today).
+        arrive_by: Latest acceptable **scheduled arrival at to_station** as
+            "HH:MM" or "H:MM AM/PM". For "arrive at Petco by 6:00 PM", first
+            subtract walking time from the venue to ``to_station``, then pass that
+            earlier time here.
+        after_departure: Optional earliest departure from ``from_station``.
+
+    Returns:
+        Matching trips sorted by departure (latest departures first when
+        ``arrive_by`` is set — pick the top line for the tightest feasible plan).
+    """
+    try:
+        feed = get_feed()
+        from_ids = _match_stop_ids(from_station, feed.stops)
+        to_ids = _match_stop_ids(to_station, feed.stops)
+        if not from_ids:
+            return f"No trolley station matching '{from_station}' was found."
+        if not to_ids:
+            return f"No trolley station matching '{to_station}' was found."
+
+        now = _now_pacific()
+        today = now.strftime("%Y%m%d")
+        date = _parse_service_date(service_date) if service_date else today
+        if date == today:
+            when_label = "today"
+        else:
+            when_label = datetime.strptime(date, "%Y%m%d").strftime("%A %Y-%m-%d")
+
+        arrive_by_seconds = (
+            _parse_clock_to_seconds(arrive_by) if arrive_by else None
+        )
+        after_dep_seconds = (
+            _parse_clock_to_seconds(after_departure) if after_departure else None
+        )
+
+        lr_trips = _light_rail_trip_ids(feed)
+        active = _trips_on_date(feed, date)
+        if not active:
+            return f"No scheduled trolley service {when_label}."
+        trip_ids = lr_trips & active
+
+        st = feed.stop_times.loc[feed.stop_times["trip_id"].isin(trip_ids)].copy()
+        st["_dep"] = st["departure_time"].map(timestr_to_seconds)
+        st["_arr"] = st["arrival_time"].map(timestr_to_seconds)
+
+        rows = []
+        for trip_id, group in st.groupby("trip_id"):
+            group = group.sort_values("stop_sequence")
+            from_rows = group[group["stop_id"].isin(from_ids)]
+            to_rows = group[group["stop_id"].isin(to_ids)]
+            if from_rows.empty or to_rows.empty:
+                continue
+            o_seq = from_rows["stop_sequence"].min()
+            d_seq = to_rows["stop_sequence"].min()
+            if d_seq <= o_seq:
+                continue
+            dep_row = from_rows.sort_values("stop_sequence").iloc[0]
+            arr_row = to_rows.sort_values("stop_sequence").iloc[0]
+            dep_s = int(dep_row["_dep"])
+            arr_s = int(arr_row["_arr"])
+            if after_dep_seconds is not None and dep_s < after_dep_seconds:
+                continue
+            if arrive_by_seconds is not None and arr_s > arrive_by_seconds:
+                continue
+            trip = feed.trips.loc[feed.trips["trip_id"] == trip_id].iloc[0]
+            route = feed.routes.loc[feed.routes["route_id"] == trip["route_id"]].iloc[0]
+            label = route.get("route_long_name") or route.get("route_short_name") or "Trolley"
+            rows.append(
+                {
+                    "_dep": dep_s,
+                    "_arr": arr_s,
+                    "line": label,
+                    "headsign": trip.get("trip_headsign"),
+                    "dep": dep_s,
+                    "arr": arr_s,
+                }
+            )
+
+        if not rows:
+            msg = (
+                f"No scheduled trolley trips from '{from_station}' to '{to_station}' "
+                f"{when_label}"
+            )
+            if arrive_by:
+                msg += f" with arrival at '{to_station}' by {arrive_by}"
+            msg += "."
+            return msg
+
+        # Latest departure first when filtering by arrive_by (tightest feasible).
+        rows.sort(key=lambda r: r["_dep"], reverse=bool(arrive_by_seconds))
+        lines = []
+        for r in rows[:_MAX_TRIP_OPTIONS]:
+            dep = _format_clock(r["dep"])
+            arr = _format_clock(r["arr"])
+            ride_min = max(1, round((r["arr"] - r["dep"]) / 60))
+            head = f"  (to {r['headsign']})" if r.get("headsign") else ""
+            lines.append(
+                f"- Depart {dep} → Arrive {arr} ({ride_min} min ride)  {r['line']}{head}"
+            )
+
+        header = (
+            f"Scheduled trolley trips from {from_station} to {to_station} {when_label}"
+        )
+        if arrive_by:
+            header += f" (arrival at {to_station} by {arrive_by})"
+        return (
+            header
+            + ":\n"
+            + "\n".join(lines)
+            + "\n(Scheduled GTFS times; ride duration is on the trolley only — use "
+            f"`get_walking_time` for the walk after alighting. "
+            f"{_STATION_BUFFER_MINUTES} min buffer at origin station before boarding.)"
+        )
+
+    except Exception as e:
+        return f"Error getting trolley trips between stations: {e}"

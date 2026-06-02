@@ -6,6 +6,7 @@ returns. Tools are decorated with ``@tool``; invoke them with ``.invoke({...})``
 or call the underlying function via ``.func(...)``.
 """
 
+import json
 import zipfile
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
@@ -17,21 +18,26 @@ from google.maps import routing_v2
 
 from src.tools import ALL_TOOLS
 from src.tools.clock import get_current_time
-from src.tools.location import get_current_location
 from src.tools.parking import get_station_parking_info
 from src.tools.routing import get_driving_time, get_walking_time
-from src.tools.trolley import find_nearby_trolley_stations, get_trolley_schedule
+from src.tools.timeline import build_trip_timeline
+from src.tools.trolley import (
+    find_nearby_trolley_stations,
+    get_trolley_schedule,
+    get_trolley_trips_between_stations,
+)
 
 
 def test_all_tools_exposed():
     """Every tool should be registered for the agent to bind."""
-    assert len(ALL_TOOLS) == 7
+    assert len(ALL_TOOLS) == 8
     names = {t.name for t in ALL_TOOLS}
     assert "get_driving_time" in names
     assert "get_current_time" in names
-    assert "get_current_location" in names
     assert "get_station_parking_info" in names
     assert "get_trolley_schedule" in names
+    assert "get_trolley_trips_between_stations" in names
+    assert "build_trip_timeline" in names
     # The live-arrivals tool was removed (MTS has no public real-time feed).
     assert "get_next_trolley_arrivals" not in names
 
@@ -57,48 +63,6 @@ class TestGetCurrentTime:
         # Matches the documented "Monday 2026-06-01 14:20 PDT" style output.
         assert result == "Monday 2026-06-01 14:20 PDT"
         mock_datetime.now.assert_called_once_with(ZoneInfo("America/Los_Angeles"))
-
-
-class TestGetCurrentLocation:
-    """Tests for the get_current_location tool (Google Maps client mocked)."""
-
-    def test_returns_reverse_geocoded_address(self):
-        """Geolocate + reverse-geocode should produce a readable summary."""
-        mock_gmaps = Mock()
-        mock_gmaps.geolocate.return_value = {
-            "location": {"lat": 32.7157, "lng": -117.1611},
-            "accuracy": 42.0,
-        }
-        mock_gmaps.reverse_geocode.return_value = [
-            {"formatted_address": "Downtown, San Diego, CA"}
-        ]
-
-        with patch("src.tools.location.maps_client", return_value=mock_gmaps):
-            result = get_current_location.invoke({})
-
-        assert "Downtown, San Diego, CA" in result
-        assert "32.71570" in result
-        assert "accuracy ~42 m" in result
-
-    def test_handles_missing_location(self):
-        """An empty geolocation response yields a friendly message, not a crash."""
-        mock_gmaps = Mock()
-        mock_gmaps.geolocate.return_value = {}
-
-        with patch("src.tools.location.maps_client", return_value=mock_gmaps):
-            result = get_current_location.invoke({})
-
-        assert "Could not determine" in result
-
-    def test_errors_are_returned_as_strings(self):
-        """Exceptions are caught and surfaced as a tool-friendly string."""
-        with patch(
-            "src.tools.location.maps_client",
-            side_effect=RuntimeError("GOOGLE_MAPS_API_KEY environment variable is not set"),
-        ):
-            result = get_current_location.invoke({})
-
-        assert "Error determining current location" in result
 
 
 class TestRoutingTools:
@@ -248,15 +212,32 @@ class TestFindNearbyTrolleyStations:
         # Closest station (Old Town) is listed before the farther one.
         assert result.index("Old Town") < result.index("Santa Fe Depot")
 
+    def test_lists_closest_when_none_within_radius(self, gtfs_feed):
+        # Point far from fixture stations so a small radius finds nothing nearby.
+        gmaps = self._geocoder(lat=32.60, lng=-117.10)
+
+        with patch("src.tools.trolley.maps_client", return_value=gmaps), patch(
+            "src.tools.trolley.get_feed", return_value=gtfs_feed
+        ):
+            result = find_nearby_trolley_stations.invoke(
+                {"location": "remote point", "radius_meters": 500}
+            )
+
+        assert "No trolley stations within 500 m" in result
+        assert "Closest stations" in result
+        assert "Old Town" in result
+
     def test_excludes_stations_outside_radius(self, gtfs_feed):
         gmaps = self._geocoder()
 
         with patch("src.tools.trolley.maps_client", return_value=gmaps), patch(
             "src.tools.trolley.get_feed", return_value=gtfs_feed
         ):
-            result = find_nearby_trolley_stations.invoke({"location": "Old Town"})
+            result = find_nearby_trolley_stations.invoke(
+                {"location": "Old Town", "radius_meters": 1500}
+            )
 
-        # Default 1500 m radius includes Old Town but not the ~5 km Santa Fe Depot.
+        # 1500 m radius includes Old Town but not the ~5 km Santa Fe Depot.
         assert "Old Town" in result
         assert "Santa Fe Depot" not in result
 
@@ -366,6 +347,121 @@ class TestGetTrolleySchedule:
         with patch("src.tools.trolley.get_feed", side_effect=RuntimeError("boom")):
             result = get_trolley_schedule.invoke({"station": "Old Town"})
         assert "Error getting trolley schedule" in result
+
+
+class TestGetTrolleyTripsBetweenStations:
+    """Tests for arrive-by-aware trip listing between two stations."""
+
+    def _run(self, feed, **kwargs):
+        with patch("src.tools.trolley.get_feed", return_value=feed):
+            return get_trolley_trips_between_stations.invoke(
+                {"from_station": "Old Town", "to_station": "Santa Fe Depot", **kwargs}
+            )
+
+    def test_lists_trip_with_arrival_by(self, gtfs_feed):
+        result = self._run(gtfs_feed, service_date="2026-06-05", arrive_by="17:30")
+        assert "Depart 5:10 PM" in result
+        assert "Arrive 5:20 PM" in result
+        assert "10 min ride" in result
+        assert "UC San Diego Blue Line" in result
+
+    def test_arrive_by_excludes_late_trips(self, gtfs_feed):
+        result = self._run(gtfs_feed, service_date="2026-06-05", arrive_by="17:15")
+        assert "No scheduled trolley trips" in result
+
+    def test_unknown_station(self, gtfs_feed):
+        with patch("src.tools.trolley.get_feed", return_value=gtfs_feed):
+            result = get_trolley_trips_between_stations.invoke(
+                {
+                    "from_station": "Nowhere",
+                    "to_station": "Santa Fe Depot",
+                }
+            )
+        assert "No trolley station matching 'Nowhere'" in result
+
+
+class TestBuildTripTimeline:
+    """Tests for deterministic arrive-by timeline assembly."""
+
+    _LEGS = json.dumps(
+        [
+            {
+                "depart": "5:05 PM",
+                "arrive": "5:35 PM",
+                "description": "Blue Line Old Town → America Plaza",
+            }
+        ]
+    )
+
+    def test_valid_single_leg_plan(self):
+        result = build_trip_timeline.invoke(
+            {
+                "target_arrival": "6:00 PM",
+                "destination": "Petco Park",
+                "origin_label": "home",
+                "boarding_station": "Old Town",
+                "exit_station": "America Plaza",
+                "drive_minutes": 7,
+                "walk_minutes": 10,
+                "trolley_legs_json": self._LEGS,
+            }
+        )
+        assert "Timeline validation failed" not in result
+        assert "Leave home: 4:50 PM" in result
+        assert "Final arrival at Petco Park: 5:45 PM" in result
+        assert "15 min before your 6:00 PM deadline" in result
+
+    def test_rejects_late_plan_like_screenshot(self):
+        legs = json.dumps(
+            [
+                {
+                    "depart": "5:54 PM",
+                    "arrive": "6:06 PM",
+                    "description": "Blue Line Mission San Diego → America Plaza",
+                },
+                {
+                    "depart": "6:10 PM",
+                    "arrive": "6:20 PM",
+                    "description": "Green Line America Plaza → 12th & Imperial",
+                },
+            ]
+        )
+        result = build_trip_timeline.invoke(
+            {
+                "target_arrival": "6:00 PM",
+                "destination": "Petco Park",
+                "origin_label": "home",
+                "boarding_station": "Mission San Diego",
+                "exit_station": "12th & Imperial Transit Center",
+                "drive_minutes": 4,
+                "walk_minutes": 4,
+                "trolley_legs_json": legs,
+            }
+        )
+        assert "Timeline validation failed" in result
+        assert "6:24 PM" in result
+
+    def test_rejects_overlapping_transfer_legs(self):
+        legs = json.dumps(
+            [
+                {"depart": "5:00 PM", "arrive": "5:20 PM", "description": "Leg 1"},
+                {"depart": "5:15 PM", "arrive": "5:35 PM", "description": "Leg 2"},
+            ]
+        )
+        result = build_trip_timeline.invoke(
+            {
+                "target_arrival": "6:00 PM",
+                "destination": "Petco Park",
+                "origin_label": "home",
+                "boarding_station": "Old Town",
+                "exit_station": "12th & Imperial",
+                "drive_minutes": 7,
+                "walk_minutes": 4,
+                "trolley_legs_json": legs,
+            }
+        )
+        assert "Timeline validation failed" in result
+        assert "before leg 1 arrives" in result
 
 
 class TestGetStationParkingInfo:

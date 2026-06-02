@@ -10,7 +10,7 @@ Clients are created lazily on first use, so importing a tool module never fails
 just because the key isn't set yet.
 
 Testing tip: prefer patching the tool's reference (e.g.
-``patch("src.tools.location.maps_client")``). If you ever patch a client here
+``patch("src.tools.trolley.maps_client")``). If you ever patch a client here
 directly, call ``<factory>.cache_clear()`` in a fixture so a cached instance
 doesn't leak between tests.
 """
@@ -32,7 +32,7 @@ def _api_key() -> str:
 
 @functools.lru_cache(maxsize=1)
 def maps_client() -> googlemaps.Client:
-    """Legacy Google Maps client, used for Geocoding + Geolocation."""
+    """Legacy Google Maps client, used for Geocoding."""
     return googlemaps.Client(key=_api_key())
 
 

@@ -11,10 +11,16 @@ lets us assert on how the graph *routes*:
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from src import graph as graph_module
 from src.graph import build_agent, llm_node
 from src.tools import ALL_TOOLS
+
+
+def _test_agent():
+    """Agent with in-memory checkpoints so tests do not touch ~/.config."""
+    return build_agent(checkpointer=InMemorySaver())
 
 
 class FakeChatModel:
@@ -41,7 +47,7 @@ class FakeChatModel:
 
 def test_build_agent_compiles_with_expected_nodes():
     """build_agent() returns a compiled graph wired with both nodes."""
-    compiled = build_agent()
+    compiled = _test_agent()
     assert compiled is not None
     nodes = set(compiled.get_graph().nodes)
     assert {"llm_node", "tool_node"} <= nodes
@@ -73,7 +79,7 @@ def test_graph_ends_when_no_tool_calls():
     with patch("src.graph.get_llm", return_value=fake):
         # The graph is compiled with a checkpointer, so invoking it requires a
         # thread_id to scope the persisted conversation state.
-        result = build_agent().invoke(
+        result = _test_agent().invoke(
             {"messages": [HumanMessage(content="hi")]},
             {"configurable": {"thread_id": "test"}},
         )
@@ -100,7 +106,7 @@ def test_graph_routes_through_tool_node_then_back():
     fake = FakeChatModel(responses)
 
     with patch("src.graph.get_llm", return_value=fake):
-        result = build_agent().invoke(
+        result = _test_agent().invoke(
             {"messages": [HumanMessage(content="how long to drive A to B?")]},
             {"configurable": {"thread_id": "test"}},
         )
@@ -118,7 +124,7 @@ def test_memory_persists_across_turns_on_same_thread():
     config = {"configurable": {"thread_id": "mem-same-thread"}}
 
     with patch("src.graph.get_llm", return_value=fake):
-        agent = build_agent()
+        agent = _test_agent()
         agent.invoke({"messages": [HumanMessage(content="my name is Alex")]}, config)
         agent.invoke({"messages": [HumanMessage(content="what is my name?")]}, config)
 
@@ -135,7 +141,7 @@ def test_memory_is_isolated_across_threads():
     fake = FakeChatModel([AIMessage(content="reply A"), AIMessage(content="reply B")])
 
     with patch("src.graph.get_llm", return_value=fake):
-        agent = build_agent()
+        agent = _test_agent()
         agent.invoke(
             {"messages": [HumanMessage(content="thread one message")]},
             {"configurable": {"thread_id": "mem-thread-A"}},

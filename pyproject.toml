@@ -1,6 +1,6 @@
 [project]
 name = "sd-trolley-agent"
-version = "0.3.0"
+version = "0.3.8"
 description = "A Python project using UV for dependency management"
 readme = "README.md"
 requires-python = ">=3.11"

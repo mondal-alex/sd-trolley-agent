@@ -17,8 +17,7 @@
    - Create a project (or select an existing one) and enable billing.
    - Enable these APIs:
      - **Routes API** (driving/walking times)
-     - **Geocoding API** (address ↔ lat/lng)
-     - **Geolocation API** (current location)
+     - **Geocoding API** (address ↔ lat/lng for station search)
    - Create an API Key.
 
 ## Installation
@@ -98,6 +97,6 @@ sd-trolley "I need to get from La Jolla to Downtown by 6 PM. When should I leave
 - ✅ Find nearby trolley stations from any location (Geocoding + GTFS)
 - ✅ Trolley schedules (static GTFS)
 - ✅ Station park-and-ride info (free vs paid)
-- ✅ Current location and current San Diego time
+- ✅ Current San Diego time (`get_current_time`)
 - ❌ Real-time arrivals — MTS publishes no public GTFS-Realtime feed, so times
   are **scheduled**, not live.
