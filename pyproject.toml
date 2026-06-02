@@ -11,7 +11,9 @@ dependencies = [
     "langgraph>=0.6.4",
     "langchain-community>=0.3.0",
     "langchain-ollama>=0.2.0",
+    "google-maps-routing>=0.6.0",
     "googlemaps>=4.10.0",
+    "gtfs-kit>=10.0.0",
     "python-dotenv>=1.0.0",
 ]
 

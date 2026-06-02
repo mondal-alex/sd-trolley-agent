@@ -40,6 +40,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import InMemorySaver
 
 from .llm import get_llm
 from .prompts import SYSTEM_PROMPT
@@ -47,14 +48,12 @@ from .state import AgentState
 from .tools import ALL_TOOLS
 
 
-def llm_node(state: AgentState) -> dict:
-    """The reasoning node: call the LLM and return its message.
 
-    Steps to implement:
-        1. Build the model with tools bound:  ``get_llm().bind_tools(ALL_TOOLS)``.
-        2. Prepend the system prompt to ``state["messages"]`` (a SystemMessage).
-        3. Invoke the model on those messages.
-        4. Return ``{"messages": [response]}`` so the reducer appends it.
+def llm_node(state: AgentState) -> dict:
+    """The reasoning node: bind tools, prepend the system prompt, call the LLM.
+
+    Returns ``{"messages": [response]}`` so the ``add_messages`` reducer appends
+    the model's reply (which may contain tool calls) to the conversation.
     """
 
     # Bind the tools to the LLM model.
@@ -75,18 +74,13 @@ def llm_node(state: AgentState) -> dict:
 
 
 def build_agent() -> CompiledStateGraph:
-    """Construct and compile the agent graph.
+    """Construct and compile the ReAct agent graph.
 
-    Suggested steps:
-        1. ``graph = StateGraph(AgentState)``
-        2. Add the reasoning node:   ``graph.add_node("agent", agent_node)``
-        3. Add the tool node:        ``graph.add_node("tools", ToolNode(ALL_TOOLS))``
-        4. Set the entry point:      ``graph.add_edge(START, "agent")``
-        5. Conditional routing from "agent" using ``tools_condition`` so tool
-           calls go to "tools" and a final answer goes to END.
-        6. Loop back:                ``graph.add_edge("tools", "agent")``
-        7. ``return graph.compile()``  (optionally pass a checkpointer for memory)
+    Wires ``START -> llm_node -> (tools? -> tool_node -> llm_node)* -> END`` and
+    compiles with an in-memory checkpointer so a conversation persists across
+    turns when invoked with the same ``thread_id``.
     """
+    checkpointer = InMemorySaver()
 
     # Add nodes
     agent_builder = StateGraph(AgentState)
@@ -104,10 +98,5 @@ def build_agent() -> CompiledStateGraph:
     )
     agent_builder.add_edge("tool_node", "llm_node")
 
-    agent = agent_builder.compile()
+    agent = agent_builder.compile(checkpointer=checkpointer)
     return agent
-
-
-
-# A module-level compiled graph is handy for the CLI and `langgraph dev`.
-graph = build_agent()

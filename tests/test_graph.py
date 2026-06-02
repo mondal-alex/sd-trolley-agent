@@ -71,8 +71,11 @@ def test_graph_ends_when_no_tool_calls():
     fake = FakeChatModel([AIMessage(content="final answer")])
 
     with patch("src.graph.get_llm", return_value=fake):
+        # The graph is compiled with a checkpointer, so invoking it requires a
+        # thread_id to scope the persisted conversation state.
         result = build_agent().invoke(
-            {"messages": [HumanMessage(content="hi")]}
+            {"messages": [HumanMessage(content="hi")]},
+            {"configurable": {"thread_id": "test"}},
         )
 
     assert result["messages"][-1].content == "final answer"
@@ -98,7 +101,8 @@ def test_graph_routes_through_tool_node_then_back():
 
     with patch("src.graph.get_llm", return_value=fake):
         result = build_agent().invoke(
-            {"messages": [HumanMessage(content="how long to drive A to B?")]}
+            {"messages": [HumanMessage(content="how long to drive A to B?")]},
+            {"configurable": {"thread_id": "test"}},
         )
 
     # The tool node executed (ToolNode captures the NotImplementedError into a
@@ -106,3 +110,43 @@ def test_graph_routes_through_tool_node_then_back():
     assert any(isinstance(m, ToolMessage) for m in result["messages"])
     # After looping back, the second llm response ends the run.
     assert result["messages"][-1].content == "here is your plan"
+
+
+def test_memory_persists_across_turns_on_same_thread():
+    """Reusing a thread_id should let the second turn see the first exchange."""
+    fake = FakeChatModel([AIMessage(content="first reply"), AIMessage(content="second reply")])
+    config = {"configurable": {"thread_id": "mem-same-thread"}}
+
+    with patch("src.graph.get_llm", return_value=fake):
+        agent = build_agent()
+        agent.invoke({"messages": [HumanMessage(content="my name is Alex")]}, config)
+        agent.invoke({"messages": [HumanMessage(content="what is my name?")]}, config)
+
+    # On the second turn the llm node should have been handed the full history:
+    # the first human + AI messages, plus the new human message.
+    second_turn_input = [m.content for m in fake.seen_messages[-1]]
+    assert "my name is Alex" in second_turn_input
+    assert "first reply" in second_turn_input
+    assert "what is my name?" in second_turn_input
+
+
+def test_memory_is_isolated_across_threads():
+    """A different thread_id should not see another thread's history."""
+    fake = FakeChatModel([AIMessage(content="reply A"), AIMessage(content="reply B")])
+
+    with patch("src.graph.get_llm", return_value=fake):
+        agent = build_agent()
+        agent.invoke(
+            {"messages": [HumanMessage(content="thread one message")]},
+            {"configurable": {"thread_id": "mem-thread-A"}},
+        )
+        agent.invoke(
+            {"messages": [HumanMessage(content="thread two message")]},
+            {"configurable": {"thread_id": "mem-thread-B"}},
+        )
+
+    second_turn_input = [m.content for m in fake.seen_messages[-1]]
+    assert "thread two message" in second_turn_input
+    # The other thread's conversation must not leak in.
+    assert "thread one message" not in second_turn_input
+    assert "reply A" not in second_turn_input

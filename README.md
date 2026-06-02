@@ -12,6 +12,64 @@ This project uses [UV](https://github.com/astral-sh/uv) for dependency managemen
 
 - Python 3.11+
 - UV (already installed)
+- [Ollama](https://ollama.com/) running locally with a tool-calling model pulled
+- A Google Maps Platform API key (see below)
+
+### Google Maps APIs
+
+The agent's tools call several Google Maps Platform APIs. Enable these in your
+[Google Cloud project](https://console.cloud.google.com/) and put the key in
+`.env` as `GOOGLE_MAPS_API_KEY` (see `.env.example`). Billing must be enabled.
+
+| API | Powers | Client library | Used for |
+|-----|--------|----------------|----------|
+| Routes API | `get_driving_time`, `get_walking_time` | `google-maps-routing` | Route duration/distance (traffic-aware driving) |
+| Geocoding API | `find_nearby_trolley_stations`, `get_current_location` | `googlemaps` | Address ↔ lat/lng (and reverse geocoding) |
+| Geolocation API | `get_current_location` | `googlemaps` | Estimate location from network signals (no GPS) |
+
+> This project uses Google's **current** APIs. Routes API replaces the legacy
+> Directions + Distance Matrix APIs and is recommended for new projects (it may
+> be the only version enableable on a freshly created Cloud project).
+
+> Geocoding and Geolocation have no "new" successor; they're accessed with the
+> `googlemaps` client and are still fully supported.
+
+> `find_nearby_trolley_stations` does **not** use Google Places — it geocodes
+> the input location, then finds the nearest trolley stations directly from the
+> GTFS feed (see below). This keeps station names consistent with
+> `get_trolley_schedule`.
+
+> Gotcha: the Routes API requires a **field mask** on each request (listing the
+> response fields you want) or the response comes back empty.
+
+> Minimal start: only **Routes API** is needed to get the routing tools
+> working. Add Geocoding + Geolocation when implementing the station-finding and
+> location tools.
+
+### Trolley data (GTFS)
+
+The trolley timetable (`get_trolley_schedule`) and nearby-station search
+(`find_nearby_trolley_stations`) both come from the San Diego MTS **static
+GTFS** feed, downloaded automatically and cached locally under `.gtfs_cache/`
+(refreshed weekly). No API key is needed for the feed itself. Parsing is done
+with [`gtfs-kit`](https://pypi.org/project/gtfs-kit/). Sharing one data source
+keeps station names consistent across both tools.
+
+### Station parking
+
+MTS does not publish structured park-and-ride data, so `get_station_parking_info`
+uses a small curated table in `src/tools/parking.py`, transcribed from the
+official [MTS Transit Station Parking](https://www.sdmts.com/transit-services/transit-station-parking)
+page. Every listed lot is free except **UTC Transit Center** (pay parking);
+stations not on the list have no free MTS lot, which the tool states explicitly
+so the agent can honor "avoid paid parking" constraints.
+
+> No real-time / live arrivals: MTS does not publish a public GTFS-Realtime
+> feed — their developer page states "We hope to share our real time
+> information in the future"
+> ([sdmts.com/business-center/app-developers](https://www.sdmts.com/business-center/app-developers)).
+> Because of this, the live-arrivals tool was intentionally removed and trolley
+> times are reported as **scheduled**, not live.
 
 ### Installation
 
@@ -104,8 +162,13 @@ sd-trolley-agent/
 │   ├── graph.py             # The ReAct agent graph (build_graph)
 │   └── tools/               # Tools the agent can call
 │       ├── __init__.py      # ALL_TOOLS registry
-│       ├── routing.py       # Google Maps drive/walk times
-│       └── trolley.py       # MTS trolley stations/schedule/arrivals
+│       ├── _clients.py      # Shared, cached Google API clients
+│       ├── routing.py       # Routes API drive/walk times
+│       ├── trolley.py       # Nearby stations + schedule (GTFS)
+│       ├── parking.py       # Curated MTS park-and-ride data (free/paid)
+│       ├── gtfs.py          # MTS static GTFS feed download/cache
+│       ├── location.py      # Current location (Google Geolocation)
+│       └── clock.py         # Current time in San Diego
 ├── tests/                   # Test scaffolding
 ├── run_agent.py             # Interactive CLI entry point
 ├── pyproject.toml           # Project configuration and dependencies
